@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Original mark: a message bubble with a clock badge, meaning "a message,
+  timed". Not a copy of any app's logo or trademark — plain geometric shapes
+  in a neutral indigo/amber palette.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- message bubble -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,26 H66 A8,8 0 0 1 74,34 V50 A8,8 0 0 1 66,58 H36 A8,8 0 0 1 28,50 V34 A8,8 0 0 1 36,26 Z" />
+
+    <!-- text-line cutouts inside the bubble -->
+    <path
+        android:fillColor="#4338CA"
+        android:pathData="M34,36 H58 V39 H34 Z" />
+    <path
+        android:fillColor="#4338CA"
+        android:pathData="M34,44 H50 V47 H34 Z" />
+
+    <!-- clock badge -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M70,68 m-14,0 a14,14 0 1,0 28,0 a14,14 0 1,0 -28,0" />
+    <path
+        android:strokeColor="#4338CA"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M70,68 L70,58" />
+    <path
+        android:strokeColor="#4338CA"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M70,68 L77,68" />
+</vector>

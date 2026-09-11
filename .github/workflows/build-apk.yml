@@ -1,0 +1,73 @@
+name: Build debug APK and publish a Release
+
+# Builds the app on GitHub's own runners (never on your machine, never in any
+# sandbox) and attaches the finished .apk to a GitHub Release, because Release
+# assets download as a single plain file straight from your phone's browser —
+# unlike raw workflow artifacts, which the GitHub mobile app handles badly and
+# which older setups deliver zipped. Nothing here auto-installs anything; you
+# still open the download and tap Install yourself.
+#
+# Uses only: GitHub's own actions/setup-java, the Gradle Foundation's official
+# setup-gradle action, Google's own command-line SDK tools fetched directly
+# from dl.google.com, and GitHub's own `gh` CLI to publish the release. No
+# third-party marketplace "black box" actions.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write   # needed so this workflow can create a Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK command-line tools (direct from Google)
+        run: |
+          set -e
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          cd "$HOME/android-sdk/cmdline-tools"
+          # If this URL 404s in the future, grab the current one from
+          # https://developer.android.com/studio#command-line-tools-only
+          curl -sSL -o cmdline-tools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdline-tools.zip
+          mv cmdline-tools latest
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> "$GITHUB_ENV"
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$HOME/android-sdk/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Accept licenses and install the SDK pieces this project needs
+        run: |
+          yes | sdkmanager --sdk_root="$HOME/android-sdk" --licenses > /dev/null
+          sdkmanager --sdk_root="$HOME/android-sdk" \
+            "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+
+      - name: Publish APK as a GitHub Release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" \
+            app/build/outputs/apk/debug/app-debug.apk \
+            --repo "${{ github.repository }}" \
+            --title "scheduler-android build ${{ github.run_number }}" \
+            --notes "Automated debug build from commit ${{ github.sha }}. Debug-signed — for sideloading on your own device only." \
+            --latest
