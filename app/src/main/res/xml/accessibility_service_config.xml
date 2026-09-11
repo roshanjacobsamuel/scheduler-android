@@ -5,4 +5,4 @@
     android:accessibilityFlags="flagDefault"
     android:canRetrieveWindowContent="true"
     android:notificationTimeout="200"
-    android:packageNames="com.whatsapp" />
+    android:packageNames="" />

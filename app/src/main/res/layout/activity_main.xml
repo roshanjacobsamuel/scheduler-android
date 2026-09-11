@@ -104,5 +104,12 @@
         android:layout_marginTop="32dp"
         android:text="View / cancel scheduled messages" />
 
+    <Button
+        android:id="@+id/settingsButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Settings (lock screen PIN)" />
+
 </LinearLayout>
 </ScrollView>

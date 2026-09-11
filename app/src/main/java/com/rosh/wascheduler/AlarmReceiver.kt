@@ -1,23 +1,22 @@
 package com.rosh.wascheduler
 
+import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
 import java.net.URLEncoder
 
 /**
  * Fires when the scheduled time arrives.
  *
- * Individual chats: opens WhatsApp's chat screen with the message pre-filled,
- * using WhatsApp's own documented "click to chat" deep link
- * (https://wa.me/<number>?text=<text>) — that part is 100% official Meta
- * behavior, not automation. WhatsAppAccessibilityService then just clicks Send.
+ * If the phone is locked and a PIN is saved in Settings, this wakes the screen
+ * and hands the PIN + job to WhatsAppAccessibilityService, which taps the lock
+ * screen digits and then launches WhatsApp itself once unlocked.
  *
- * Groups: there is no deep link for a specific group (groups don't have phone
- * numbers), so this just brings WhatsApp's chat list to the front and hands
- * WhatsAppAccessibilityService a "job" describing the group name and the
- * message to type — it drives the search-and-type flow itself.
+ * If the phone is already unlocked (or no PIN is saved), it launches WhatsApp
+ * directly as before.
  */
 class AlarmReceiver : BroadcastReceiver() {
 
@@ -29,6 +28,21 @@ class AlarmReceiver : BroadcastReceiver() {
         val entry = store.get(id) ?: return
         store.delete(id)
 
+        val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        val pin = PinStore(context).getPin()
+
+        if (keyguardManager.isKeyguardLocked && pin != null) {
+            wakeScreen(context)
+            WhatsAppAccessibilityService.pendingPinUnlock = pin
+            if (entry.recipientType == "group") {
+                WhatsAppAccessibilityService.pendingGroupJob = buildGroupJob(entry)
+            } else {
+                WhatsAppAccessibilityService.pendingIndividualEntry = entry
+            }
+            // Don't launch WhatsApp yet — service handles it after unlock.
+            return
+        }
+
         if (entry.recipientType == "group") {
             sendToGroup(context, entry)
         } else {
@@ -36,9 +50,18 @@ class AlarmReceiver : BroadcastReceiver() {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun wakeScreen(context: Context) {
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "RoshSchedule:wakeForUnlock"
+        )
+        wakeLock.acquire(5 * 60 * 1000L)
+        WhatsAppAccessibilityService.screenWakeLock = wakeLock
+    }
+
     private fun sendToIndividual(context: Context, entry: ScheduledMessage) {
-        // Real @mentions are a group-chat concept in WhatsApp, so in a 1:1
-        // chat we just flatten "@[Name]" down to plain "@Name" text.
         val plainMessage = entry.message.replace(Regex("""@\[([^]]+)]"""), "@$1")
         val encodedMessage = URLEncoder.encode(plainMessage, "UTF-8")
         val uri = Uri.parse("https://wa.me/${entry.recipient}?text=$encodedMessage")
@@ -51,16 +74,16 @@ class AlarmReceiver : BroadcastReceiver() {
     }
 
     private fun sendToGroup(context: Context, entry: ScheduledMessage) {
-        val segments = parseSegments(entry.message)
-        WhatsAppAccessibilityService.pendingGroupJob =
-            WhatsAppAccessibilityService.GroupJob(entry.recipient, segments)
+        WhatsAppAccessibilityService.pendingGroupJob = buildGroupJob(entry)
 
         val launchIntent = context.packageManager.getLaunchIntentForPackage("com.whatsapp") ?: return
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         context.startActivity(launchIntent)
     }
 
-    /** Splits "Hi @[Priya Sharma], meeting at 5" into text/mention segments. */
+    private fun buildGroupJob(entry: ScheduledMessage): WhatsAppAccessibilityService.GroupJob =
+        WhatsAppAccessibilityService.GroupJob(entry.recipient, parseSegments(entry.message))
+
     private fun parseSegments(message: String): List<WhatsAppAccessibilityService.Segment> {
         val segments = mutableListOf<WhatsAppAccessibilityService.Segment>()
         val regex = Regex("""@\[([^]]+)]""")

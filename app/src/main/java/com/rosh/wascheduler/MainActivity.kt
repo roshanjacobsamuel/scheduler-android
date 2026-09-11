@@ -101,5 +101,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.viewPendingButton).setOnClickListener {
             startActivity(Intent(this, PendingActivity::class.java))
         }
+
+        findViewById<Button>(R.id.settingsButton).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
     }
 }

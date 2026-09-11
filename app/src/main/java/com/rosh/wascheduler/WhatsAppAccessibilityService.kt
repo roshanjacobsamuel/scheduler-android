@@ -1,37 +1,33 @@
 package com.rosh.wascheduler
 
 import android.accessibilityservice.AccessibilityService
+import android.app.KeyguardManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
+import java.net.URLEncoder
 
 /**
- * Watches ONLY the WhatsApp package (enforced by accessibility_service_config.xml
- * via android:packageNames="com.whatsapp" — this service is structurally
- * unable to see or act on any other app). It also never touches, and cannot
- * touch, Android's lock screen: the keyguard is a separate, hardened system
- * window no accessibility service is allowed to read or inject input into,
- * by OS design — see the README's "About the lock screen" section.
+ * Watches all windows (packageNames filter removed from accessibility_service_config.xml
+ * so it can see the lock screen) but only acts on two things:
  *
- * Handles two jobs, decided by AlarmReceiver right before it opens WhatsApp:
+ *  1. Lock screen — if AlarmReceiver set pendingPinUnlock (phone was locked when the
+ *     alarm fired), this finds the digit buttons on the keypad and taps them in order,
+ *     then launches WhatsApp once the phone reports as unlocked.
  *
- *  - INDIVIDUAL: WhatsApp already opened a specific chat with the message
- *    pre-filled via the wa.me deep link. This just finds Send and clicks it.
+ *  2. WhatsApp windows (com.whatsapp) — the existing individual/group send logic.
+ *     Individual: taps the Send button after AlarmReceiver opened the wa.me deep link.
+ *     Group: drives search → open group → type message (resolving @mentions through
+ *     WhatsApp's own suggestion popup) → tap Send.
  *
- *  - GROUP: WhatsApp opened to its main chat list (there's no deep link to a
- *    specific group). This drives WhatsApp's own search box to find the
- *    group, opens it, types the message — routing any @[Name] mention
- *    through WhatsApp's own suggestion popup so it becomes a real, tappable,
- *    notifying mention rather than literal text — then taps Send.
- *
- * The group path touches several different WhatsApp screens (search, results
- * list, chat compose box), so it is meaningfully more likely than the
- * individual path to break when WhatsApp updates its UI. If a stage times
- * out it gives up with a Toast naming which stage failed, rather than
- * retrying forever or silently doing nothing.
+ * If a lock-screen stage fails (wrong PIN, keypad layout not recognised), it shows a
+ * Toast, clears all pending state, and gives up rather than retrying forever.
  */
 class WhatsAppAccessibilityService : AccessibilityService() {
 
@@ -43,12 +39,15 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     data class GroupJob(val groupName: String, val segments: List<Segment>)
 
     companion object {
-        @Volatile
-        var pendingGroupJob: GroupJob? = null
+        @Volatile var pendingGroupJob: GroupJob? = null
+        @Volatile var pendingIndividualEntry: ScheduledMessage? = null
+        @Volatile var pendingPinUnlock: String? = null
+        @Volatile var screenWakeLock: PowerManager.WakeLock? = null
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var individualHandled = false
+    private var pinUnlockInProgress = false
 
     private enum class Stage { IDLE, RUNNING }
     private var stage = Stage.IDLE
@@ -56,10 +55,17 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     private var textSoFar = ""
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || event.packageName != "com.whatsapp") return
+        if (event == null) return
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         ) return
+
+        if (pendingPinUnlock != null) {
+            handlePossibleLockScreen()
+            return
+        }
+
+        if (event.packageName != "com.whatsapp") return
 
         val job = pendingGroupJob
         if (job == null) {
@@ -76,7 +82,89 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---------- individual: unchanged, simple case ----------
+    // ---------- lock screen unlock ----------
+
+    private fun handlePossibleLockScreen() {
+        val keyguardManager = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
+        if (keyguardManager.isKeyguardLocked) {
+            if (!pinUnlockInProgress) {
+                pinUnlockInProgress = true
+                handler.postDelayed({ startPinEntry() }, 600)
+            }
+        } else {
+            // Phone just unlocked — proceed to WhatsApp
+            pendingPinUnlock = null
+            pinUnlockInProgress = false
+            screenWakeLock?.release()
+            screenWakeLock = null
+            handler.postDelayed({ launchWhatsAppAfterUnlock() }, 800)
+        }
+    }
+
+    private fun startPinEntry() {
+        val pin = pendingPinUnlock ?: return
+        var delay = 0L
+        for (digit in pin) {
+            val d = digit
+            handler.postDelayed({ tapPinDigit(d) }, delay)
+            delay += 400
+        }
+        // Check unlock result after all digits have been tapped + 1.2s buffer
+        handler.postDelayed({ checkUnlockResult() }, delay + 1200)
+    }
+
+    private fun tapPinDigit(digit: Char) {
+        val root = rootInActiveWindow ?: return
+        // Lock screen digit buttons have their digit as visible text on all stock
+        // Android versions and most OEM skins (Samsung, OnePlus, Pixel, etc.)
+        val node = findClickableByText(root, digit.toString()) ?: return
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    private fun checkUnlockResult() {
+        val keyguardManager = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
+        if (!keyguardManager.isKeyguardLocked) {
+            pendingPinUnlock = null
+            pinUnlockInProgress = false
+            screenWakeLock?.release()
+            screenWakeLock = null
+            launchWhatsAppAfterUnlock()
+        } else {
+            Toast.makeText(
+                this,
+                "Rosh Schedule: PIN unlock failed — check the PIN in Settings",
+                Toast.LENGTH_LONG
+            ).show()
+            pendingPinUnlock = null
+            pinUnlockInProgress = false
+            pendingGroupJob = null
+            pendingIndividualEntry = null
+            screenWakeLock?.release()
+            screenWakeLock = null
+        }
+    }
+
+    private fun launchWhatsAppAfterUnlock() {
+        val individualEntry = pendingIndividualEntry
+        if (individualEntry != null) {
+            pendingIndividualEntry = null
+            individualHandled = false
+            val plainMessage = individualEntry.message.replace(Regex("""@\[([^]]+)]"""), "@$1")
+            val encodedMessage = URLEncoder.encode(plainMessage, "UTF-8")
+            val uri = Uri.parse("https://wa.me/${individualEntry.recipient}?text=$encodedMessage")
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                setPackage("com.whatsapp")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } else if (pendingGroupJob != null) {
+            val launchIntent = packageManager.getLaunchIntentForPackage("com.whatsapp") ?: return
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            startActivity(launchIntent)
+        }
+    }
+
+    // ---------- individual: simple case ----------
 
     private fun tryClickSendForIndividual() {
         if (individualHandled) return
